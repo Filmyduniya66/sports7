@@ -1,29 +1,132 @@
+import json
+import re
 import urllib.request
+import sys
 
-SOURCES = [
-    "https://raw.githubusercontent.com/drmlive/sliv-live-events/refs/heads/main/sonyliv.m3u",
-    "https://raw.githubusercontent.com/doctor-8trange/zyphx8/refs/heads/main/data/fancode.m3u"
-]
+# ---------- Configuration ----------
+JSON_URL = "https://sportlink-jtv.pages.dev/Sony.json"
+PLAYLIST_URL = "https://premiumplugx.com/Sliv/sony_playlist.php?m3u"
+OUTPUT_FILE = "sony5.m3u"
+USER_AGENT = "virat@10"
 
-output = ["#EXTM3U"]
+# ---------- Helper functions ----------
+def fetch_text(url):
+    """Fetch plain text (used for the PHP playlist)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
 
-for url in SOURCES:
+def fetch_json(url):
+    """Fetch JSON data."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def extract_cookie_from_playlist(text):
+    """
+    Extract the hdnea Cookie from M3U text.
+    Priority:
+      1. '# Cookie:' line
+      2. '#EXTVLCOPT:http-cookie=' line
+      3. '"Cookie"' field inside '#EXTHTTP' JSON
+    """
+    # 1) Header comment: # Cookie: hdnea=...
+    m = re.search(r"#\s*Cookie:\s*(hdnea=[^\s#]+)", text)
+    if m:
+        return m.group(1).strip()
+
+    # 2) First #EXTVLCOPT:http-cookie=
+    m = re.search(r"#EXTVLCOPT:http-cookie=(hdnea=[^\s\n]+)", text)
+    if m:
+        return m.group(1).strip()
+
+    # 3) Cookie field inside #EXTHTTP JSON
+    m = re.search(r'"Cookie"\s*:\s*"([^"]+)"', text)
+    if m:
+        return m.group(1).strip()
+
+    return None
+
+# ---------- M3U generation ----------
+def build_m3u(channels, cookie):
+    """Merge channel list and Cookie into an M3U file."""
+    lines = ["#EXTM3U"]
+
+    for ch in channels:
+        tvg_id = ch.get("tvg_id", "")
+        tvg_name = ch.get("tvg_name", "")
+        group = ch.get("group_title", "")
+        logo = ch.get("logo", "")
+        url = ch.get("url", "")
+
+        headers = ch.get("headers", {}) or {}
+        referrer = headers.get("Referrer", "")
+        origin = headers.get("Origin", "")
+
+        # EXTINF line
+        lines.append(
+            f'#EXTINF:-1 tvg-id="{tvg_id}" tvg-name="{tvg_name}" '
+            f'tvg-logo="{logo}" group-title="{group}",{tvg_name}'
+        )
+
+        # EXTVLCOPT lines (for VLC / Tivimate)
+        if cookie:
+            lines.append(f"#EXTVLCOPT:http-cookie={cookie}")
+        if referrer:
+            lines.append(f"#EXTVLCOPT:http-referrer={referrer}")
+        lines.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
+
+        # EXTHTTP line (for Kodi / OTT Navigator)
+        http_headers = {
+            "User-Agent": USER_AGENT,
+            "Referrer": referrer,
+            "Origin": origin,
+        }
+        if cookie:
+            http_headers["Cookie"] = cookie
+
+        # Remove empty values
+        http_headers = {k: v for k, v in http_headers.items() if v}
+        lines.append(f"#EXTHTTP:{json.dumps(http_headers, ensure_ascii=False)}")
+
+        # URL
+        lines.append(url)
+        lines.append("")  # blank line separator
+
+    return "\n".join(lines)
+
+# ---------- Main ----------
+def main():
+    print("Downloading JSON channel list...")
     try:
-        data = urllib.request.urlopen(url, timeout=30).read().decode("utf-8")
-        lines = data.splitlines()
-
-        for line in lines:
-            line = line.strip()
-
-            if line and line != "#EXTM3U":
-                output.append(line)
-
-        print("Updated:", url)
-
+        channels = fetch_json(JSON_URL)
     except Exception as e:
-        print("Error:", url, e)
+        print(f"Failed to fetch JSON: {e}", file=sys.stderr)
+        sys.exit(1)
 
-with open("playlist.m3u", "w", encoding="utf-8") as f:
-    f.write("\n".join(output) + "\n")
+    print(f"Found {len(channels)} channels")
 
-print("Merged playlist created successfully.")
+    print("Downloading PHP playlist to extract Cookie...")
+    try:
+        playlist_text = fetch_text(PLAYLIST_URL)
+    except Exception as e:
+        print(f"Failed to fetch playlist: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    cookie = extract_cookie_from_playlist(playlist_text)
+
+    if cookie:
+        print(f"Extracted Cookie: {cookie[:60]}...")
+    else:
+        print("Warning: Could not extract Cookie from playlist. Cookie header will be omitted.")
+
+    print("Generating M3U...")
+    m3u_content = build_m3u(channels, cookie)
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(m3u_content)
+
+    print(f"Successfully generated {OUTPUT_FILE} with {len(channels)} channels")
+
+if __name__ == "__main__":
+    main()
