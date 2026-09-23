@@ -1,33 +1,68 @@
-name: Auto Update Playlist
+name: Update Sony Playlist
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '30 * * * *'      # every hour at minute 0 (UTC)
   workflow_dispatch:
-
-permissions:
-  contents: write
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/sony.py'
 
 jobs:
-  update:
+  update-playlist:
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    permissions:
+      contents: write
 
-      - name: Setup Python
+    concurrency:
+      group: update-sony
+      cancel-in-progress: true
+
+    env:
+      TZ: Asia/Kolkata
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch and Reset to Remote
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
-      - name: Run updater
-        run: python update.py
-
-      - name: Commit changes
+      - name: Run Script
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add playlist.m3u
-          git diff --cached --quiet || git commit -m "Auto update playlist"
-          git push
+          python scripts/sony.py
+
+      - name: Commit and Push Changes
+        run: |
+          git add sony5.m3u
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Auto-update Sony playlist ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+
+          # Rebase onto latest remote (keep our generated file on conflicts)
+          git pull --rebase -X theirs origin main
+
+          # Push only if remote hasn't moved since rebase
+          git push --force-with-lease origin main
